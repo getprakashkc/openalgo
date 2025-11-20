@@ -110,8 +110,9 @@ def check_env_version_compatibility():
 
 def load_and_check_env_variables():
     # Define the required environment variables
+    # Note: ENV_CONFIG_VERSION is only needed for .env file version checking,
+    # so it's not in the required list when using environment variables directly
     required_vars = [
-        'ENV_CONFIG_VERSION',  # Version tracking for configuration compatibility
         'BROKER_API_KEY', 
         'BROKER_API_SECRET', 
         'REDIRECT_URL', 
@@ -142,48 +143,34 @@ def load_and_check_env_variables():
         'LOG_FORMAT',      # Log message format
         'LOG_RETENTION'    # Days to retain log files
     ]
-
-    # First, check if required environment variables are already set (e.g., from Coolify)
-    # This allows the app to work in containerized environments without a .env file
-    missing_vars = [var for var in required_vars if os.getenv(var) is None]
     
     # Define the path to the .env file in the main application path
     env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
     env_file_exists = os.path.exists(env_path)
     
-    # If environment variables are not all set, try to load from .env file
-    if missing_vars and env_file_exists:
+    # Try loading from .env file first if it exists
+    # This allows the app to work with .env file for local development
+    if env_file_exists:
         # Check version compatibility before loading
         if not check_env_version_compatibility():
             sys.exit(1)
-        
-        # Load environment variables from the .env file with override=True to ensure values are updated
+        # Load environment variables from the .env file
+        # Use override=True to ensure .env values take precedence if both exist
         load_dotenv(dotenv_path=env_path, override=True)
-        
-        # Re-check for missing variables after loading from .env file
-        missing_vars = [var for var in required_vars if os.getenv(var) is None]
-    elif missing_vars and not env_file_exists:
-        # Environment variables are missing and no .env file exists
-        print("Error: .env file not found at the expected location.")
-        print("\nSolution: Copy .sample.env to .env and configure your settings")
-        print("Alternatively, set all required environment variables in your deployment platform (e.g., Coolify)")
-        sys.exit(1)
-    elif not missing_vars and env_file_exists:
-        # All environment variables are set, but .env file exists - load it for version check
-        # Check version compatibility
-        if not check_env_version_compatibility():
-            sys.exit(1)
-        # Load .env file but don't override existing environment variables
-        load_dotenv(dotenv_path=env_path, override=False)
-    # else: all vars are set and no .env file - this is fine for containerized deployments
-
-    # Check if each required environment variable is set
+    
+    # Check if required environment variables are set (after loading .env if it existed)
+    # This allows the app to work in containerized environments (e.g., Coolify) without a .env file
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
 
     if missing_vars:
         missing_list = ', '.join(missing_vars)
         print(f"Error: The following environment variables are missing: {missing_list}")
-        print("\nSolution: Check .sample.env for the latest configuration format")
+        if env_file_exists:
+            print("\nSolution: Check .sample.env for the latest configuration format")
+            print("Update your .env file with the missing variables.")
+        else:
+            print("\nSolution: Set all required environment variables in your deployment platform (e.g., Coolify)")
+            print("Alternatively, copy .sample.env to .env and configure your settings")
         sys.exit(1)
 
     # Special validation for broker-specific API key formats
