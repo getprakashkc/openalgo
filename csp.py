@@ -2,6 +2,7 @@
 
 from flask import request, current_app
 import os
+import re
 from functools import wraps
 
 def get_csp_config():
@@ -20,16 +21,25 @@ def get_csp_config():
     # Default source directive
     default_src = os.getenv('CSP_DEFAULT_SRC', "'self'")
     if default_src:
+        # Ensure 'self' has quotes if missing
+        default_src = re.sub(r'\bself\b', "'self'", default_src)
         csp_config['default-src'] = default_src
     
     # Script source directive
     script_src = os.getenv('CSP_SCRIPT_SRC', "'self' https://cdn.socket.io")
     if script_src:
+        # Ensure 'self' and 'unsafe-inline' have quotes if missing
+        # Replace unquoted keywords with quoted versions
+        script_src = re.sub(r'\bself\b', "'self'", script_src)
+        script_src = re.sub(r'\bunsafe-inline\b', "'unsafe-inline'", script_src)
         csp_config['script-src'] = script_src
     
     # Style source directive
     style_src = os.getenv('CSP_STYLE_SRC', "'self' 'unsafe-inline'")
     if style_src:
+        # Ensure 'self' and 'unsafe-inline' have quotes if missing
+        style_src = re.sub(r'\bself\b', "'self'", style_src)
+        style_src = re.sub(r'\bunsafe-inline\b', "'unsafe-inline'", style_src)
         csp_config['style-src'] = style_src
     
     # Image source directive
@@ -40,6 +50,11 @@ def get_csp_config():
     # Connect source directive (for WebSockets, etc.)
     connect_src = os.getenv('CSP_CONNECT_SRC', "'self' wss: ws:")
     if connect_src:
+        # Ensure 'self' has quotes if missing
+        connect_src = re.sub(r'\bself\b', "'self'", connect_src)
+        # Ensure https://cdn.socket.io is included for Socket.IO source maps
+        if "https://cdn.socket.io" not in connect_src:
+            connect_src += " https://cdn.socket.io"
         csp_config['connect-src'] = connect_src
     
     # Font source directive
