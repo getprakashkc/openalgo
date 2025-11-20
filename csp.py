@@ -18,28 +18,39 @@ def get_csp_config():
     if not csp_enabled:
         return None
     
+    # Helper function to ensure CSP keywords have quotes
+    def ensure_quotes(value):
+        """Ensure CSP keywords (self, unsafe-inline, etc.) have quotes, but don't double-quote"""
+        # Strategy: Normalize by removing any quotes around keywords, then add them back
+        # This handles: self, 'self', ''self'', etc. all become 'self'
+        
+        # Step 1: Match 'self' with any number of quotes before/after (as whole word)
+        # Replace with properly quoted 'self'
+        value = re.sub(r"'*\bself\b'*", "'self'", value)
+        # Step 2: Same for 'unsafe-inline'
+        value = re.sub(r"'*\bunsafe-inline\b'*", "'unsafe-inline'", value)
+        
+        return value
+    
     # Default source directive
     default_src = os.getenv('CSP_DEFAULT_SRC', "'self'")
     if default_src:
-        # Ensure 'self' has quotes if missing
-        default_src = re.sub(r'\bself\b', "'self'", default_src)
+        # Ensure 'self' has quotes if missing (but don't double-quote)
+        default_src = ensure_quotes(default_src)
         csp_config['default-src'] = default_src
     
     # Script source directive
     script_src = os.getenv('CSP_SCRIPT_SRC', "'self' https://cdn.socket.io")
     if script_src:
         # Ensure 'self' and 'unsafe-inline' have quotes if missing
-        # Replace unquoted keywords with quoted versions
-        script_src = re.sub(r'\bself\b', "'self'", script_src)
-        script_src = re.sub(r'\bunsafe-inline\b', "'unsafe-inline'", script_src)
+        script_src = ensure_quotes(script_src)
         csp_config['script-src'] = script_src
     
     # Style source directive
     style_src = os.getenv('CSP_STYLE_SRC', "'self' 'unsafe-inline'")
     if style_src:
         # Ensure 'self' and 'unsafe-inline' have quotes if missing
-        style_src = re.sub(r'\bself\b', "'self'", style_src)
-        style_src = re.sub(r'\bunsafe-inline\b', "'unsafe-inline'", style_src)
+        style_src = ensure_quotes(style_src)
         csp_config['style-src'] = style_src
     
     # Image source directive
@@ -50,8 +61,8 @@ def get_csp_config():
     # Connect source directive (for WebSockets, etc.)
     connect_src = os.getenv('CSP_CONNECT_SRC', "'self' wss: ws:")
     if connect_src:
-        # Ensure 'self' has quotes if missing
-        connect_src = re.sub(r'\bself\b', "'self'", connect_src)
+        # Ensure 'self' has quotes if missing (but don't double-quote)
+        connect_src = ensure_quotes(connect_src)
         # Ensure https://cdn.socket.io is included for Socket.IO source maps
         if "https://cdn.socket.io" not in connect_src:
             connect_src += " https://cdn.socket.io"
