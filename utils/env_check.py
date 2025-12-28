@@ -84,7 +84,19 @@ def check_env_version_compatibility():
             print("   New features may not work properly with an outdated configuration!")
             print("🔴 " + "="*68)
             
-            # Give user a chance to continue anyway
+            # Check if running in non-interactive environment (containerized)
+            # If stdin is not a TTY, we're in a container/automated environment
+            import sys
+            is_interactive = sys.stdin.isatty() if hasattr(sys.stdin, 'isatty') else False
+            
+            if not is_interactive:
+                # Non-interactive environment (e.g., Coolify, Docker)
+                # Auto-continue with warning instead of blocking
+                print("\n⚠️  Non-interactive environment detected. Continuing with outdated .env version.")
+                print("   Please update ENV_CONFIG_VERSION in your environment variables or .env file when possible.")
+                return True
+            
+            # Give user a chance to continue anyway (only in interactive environments)
             try:
                 response = input("\n⚠️  Continue anyway? (y/N): ").lower().strip()
                 if response not in ['y', 'yes']:
