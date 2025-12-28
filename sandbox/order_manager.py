@@ -12,6 +12,7 @@ Features:
 
 import os
 import sys
+import time
 from decimal import Decimal
 from datetime import datetime
 import pytz
@@ -25,6 +26,7 @@ from database.sandbox_db import (
 )
 from sandbox.fund_manager import FundManager
 from database.symbol import SymToken
+from database.token_db import get_symbol_info
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,8 +93,8 @@ class OrderManager:
             product = order_data['product'].upper()
             strategy = order_data.get('strategy', '')
 
-            # Get symbol info for lot size validation
-            symbol_obj = SymToken.query.filter_by(symbol=symbol, exchange=exchange).first()
+            # Get symbol info for lot size validation (from cache)
+            symbol_obj = get_symbol_info(symbol, exchange)
             if not symbol_obj:
                 return False, {
                     'status': 'error',
@@ -114,7 +116,7 @@ class OrderManager:
             # Exception: Allow orders that reduce/close existing positions
             if product == 'MIS':
                 from sandbox.squareoff_manager import SquareOffManager
-                from datetime import time
+                from datetime import time as dt_time
 
                 som = SquareOffManager()
                 square_off_time = som.square_off_times.get(exchange)
@@ -125,7 +127,7 @@ class OrderManager:
                     current_time = now.time()
 
                     # Market opens at 9:00 AM IST
-                    market_open_time = time(9, 0)
+                    market_open_time = dt_time(9, 0)
 
                     # Check if we're in the blocked period
                     # Two scenarios:
@@ -207,6 +209,7 @@ class OrderManager:
 
             # Determine price for margin calculation based on order type
             margin_calculation_price = None
+            cached_quote = None  # Cache quote for reuse in immediate execution
 
             # Check for existing position early (needed for fallback pricing)
             temp_existing_position = SandboxPositions.query.filter_by(
@@ -218,32 +221,43 @@ class OrderManager:
 
             if price_type == 'MARKET':
                 # For MARKET orders, fetch current LTP for margin calculation
-                try:
-                    from sandbox.execution_engine import ExecutionEngine
-                    engine = ExecutionEngine()
-                    quote = engine._fetch_quote(symbol, exchange)
-                    if quote and quote.get('ltp'):
-                        margin_calculation_price = Decimal(str(quote['ltp']))
-                        logger.debug(f"Using LTP {margin_calculation_price} for MARKET order margin calculation")
-                    else:
-                        # In sandbox mode, use a default price if API fails
-                        # Try to get last execution price from positions
-                        if temp_existing_position and temp_existing_position.ltp:
-                            margin_calculation_price = temp_existing_position.ltp
-                            logger.warning(f"API failed, using last known price {margin_calculation_price} for {symbol}")
-                        else:
-                            # Use a reasonable default for sandbox testing
-                            margin_calculation_price = Decimal('100.00')  # Default price for testing
-                            logger.warning(f"API failed, using default sandbox price {margin_calculation_price} for {symbol}")
-                except Exception as e:
-                    logger.error(f"Error fetching quote for margin calculation: {e}")
-                    # In sandbox mode, use a fallback price
-                    if temp_existing_position and temp_existing_position.ltp:
+                # We need a valid price - reject order if unavailable (no hardcoded fallback)
+                quote_fetch_success = False
+
+                # Attempt 1: Fetch live quote with retry
+                for attempt in range(3):
+                    try:
+                        from sandbox.execution_engine import ExecutionEngine
+                        engine = ExecutionEngine()
+                        quote = engine._fetch_quote(symbol, exchange)
+                        if quote and quote.get('ltp') and Decimal(str(quote['ltp'])) > 0:
+                            margin_calculation_price = Decimal(str(quote['ltp']))
+                            cached_quote = quote  # Cache for immediate execution
+                            logger.debug(f"Using LTP {margin_calculation_price} for MARKET order margin calculation")
+                            quote_fetch_success = True
+                            break
+                    except Exception as e:
+                        logger.debug(f"Quote fetch attempt {attempt + 1} failed: {e}")
+
+                    # Wait before retry (0.3s, 0.6s, 0.9s)
+                    if attempt < 2:
+                        time.sleep(0.3 * (attempt + 1))
+
+                # Attempt 2: Use position's last known LTP as fallback
+                if not quote_fetch_success:
+                    if temp_existing_position and temp_existing_position.ltp and temp_existing_position.ltp > 0:
                         margin_calculation_price = temp_existing_position.ltp
-                        logger.warning(f"API error, using last known price {margin_calculation_price} for {symbol}")
-                    else:
-                        margin_calculation_price = Decimal('100.00')  # Default price for testing
-                        logger.warning(f"API error, using default sandbox price {margin_calculation_price} for {symbol}")
+                        logger.warning(f"Quote fetch failed, using last known price {margin_calculation_price} for {symbol}")
+                        quote_fetch_success = True
+
+                # Attempt 3: Reject order if no valid price available
+                if not quote_fetch_success:
+                    logger.error(f"Cannot place MARKET order for {symbol} - unable to fetch current price")
+                    return False, {
+                        'status': 'error',
+                        'message': f'Cannot place MARKET order for {symbol} - unable to fetch current price. Please try again later or use LIMIT order with a specific price.',
+                        'mode': 'analyze'
+                    }, 400
 
             elif price_type == 'LIMIT':
                 # For LIMIT orders, use the limit price for margin calculation
@@ -432,17 +446,16 @@ class OrderManager:
 
             logger.info(f"Order placed: {orderid} - {symbol} {action} {quantity} @ {price_type}")
 
-            # Execute MARKET orders immediately
+            # Execute MARKET orders immediately using cached quote (no re-fetch needed)
             if price_type == 'MARKET':
                 try:
                     from sandbox.execution_engine import ExecutionEngine
                     engine = ExecutionEngine()
 
-                    # Fetch current quote
-                    quote = engine._fetch_quote(symbol, exchange)
-                    if quote:
-                        # Process the order immediately
-                        engine._process_order(order, quote)
+                    # Use cached quote from margin calculation (already fetched above)
+                    if cached_quote:
+                        # Process the order immediately with cached quote
+                        engine._process_order(order, cached_quote)
                         logger.info(f"Market order {orderid} executed immediately")
                     else:
                         logger.warning(f"Could not fetch quote for {symbol} on {exchange}, order remains open")
@@ -500,11 +513,8 @@ class OrderManager:
             # Update order parameters
             if 'quantity' in new_data:
                 new_quantity = int(new_data['quantity'])
-                # Validate lot size
-                symbol_obj = SymToken.query.filter_by(
-                    symbol=order.symbol,
-                    exchange=order.exchange
-                ).first()
+                # Validate lot size (from cache)
+                symbol_obj = get_symbol_info(order.symbol, order.exchange)
                 if symbol_obj and order.exchange in ['NFO', 'BFO', 'CDS', 'BCD', 'MCX', 'NCDEX']:
                     lot_size = symbol_obj.lotsize or 1
                     if new_quantity % lot_size != 0:
@@ -589,11 +599,8 @@ class OrderManager:
             else:
                 # Fallback for old orders without margin_blocked field
                 # Need to recalculate margin that was blocked based on order parameters
-                # Get symbol info to determine if margin was blocked for this order
-                symbol_obj = SymToken.query.filter_by(
-                    symbol=order.symbol,
-                    exchange=order.exchange
-                ).first()
+                # Get symbol info to determine if margin was blocked for this order (from cache)
+                symbol_obj = get_symbol_info(order.symbol, order.exchange)
 
                 if symbol_obj:
                     # Determine if this order would have had margin blocked
@@ -664,7 +671,7 @@ class OrderManager:
     def get_orderbook(self):
         """Get all orders for the user for current session only"""
         try:
-            from datetime import datetime, time, timedelta
+            from datetime import datetime, time as dt_time, timedelta
             import os
 
             # Get session expiry time from config (e.g., '03:00')
@@ -678,7 +685,7 @@ class OrderManager:
             # Calculate session start time
             # If current time is before session expiry (e.g., before 3 AM),
             # session started yesterday at expiry time
-            session_expiry_time = time(expiry_hour, expiry_minute)
+            session_expiry_time = dt_time(expiry_hour, expiry_minute)
 
             if now.time() < session_expiry_time:
                 # We're in the early morning before session expiry
@@ -764,7 +771,7 @@ class OrderManager:
                     'trigger_price': float(order.trigger_price) if order.trigger_price else 0.0,
                     'price_type': order.price_type,
                     'product': order.product,
-                    'status': order.order_status,
+                    'order_status': order.order_status,
                     'average_price': float(order.average_price) if order.average_price else 0.0,
                     'filled_quantity': order.filled_quantity,
                     'pending_quantity': order.pending_quantity,
@@ -801,6 +808,20 @@ class OrderManager:
         # Validate product
         if order_data['product'].upper() not in ['CNC', 'NRML', 'MIS']:
             return False, 'Invalid product. Must be CNC, NRML, or MIS'
+
+        # Validate product-exchange compatibility
+        exchange = order_data['exchange'].upper()
+        product = order_data['product'].upper()
+
+        # Equity exchanges (NSE/BSE cash segment): Only CNC and MIS allowed
+        if exchange in ['NSE', 'BSE']:
+            if product == 'NRML':
+                return False, f'NRML product not allowed for {exchange} equity segment. Use CNC for delivery or MIS for intraday.'
+
+        # Derivatives exchanges (F&O, Commodity, Currency): Only NRML and MIS allowed
+        if exchange in ['NFO', 'BFO', 'MCX', 'CDS', 'BCD', 'NCDEX']:
+            if product == 'CNC':
+                return False, f'CNC product not allowed for {exchange} derivatives segment. Use NRML for carryforward or MIS for intraday.'
 
         # Validate quantity
         try:
@@ -841,21 +862,24 @@ class OrderManager:
 
     def _generate_order_id(self):
         """
-        Generate unique order ID in format: YYMMDD + 8-digit sequence
-        Example: 25100100000001 (Year 2025, Oct 1st, sequence 00000001)
+        Generate unique order ID in format: YYMMDD + 8-digit unique sequence
+        Example: 25100112345678 (Year 2025, Oct 1st, unique sequence)
+
+        Uses microsecond timestamp + random component to avoid race conditions
+        when multiple orders are placed in parallel.
         """
+        import random
+
         now = datetime.now(pytz.timezone('Asia/Kolkata'))
         date_prefix = now.strftime('%y%m%d')  # YYMMDD format
 
-        # Get the count of orders for today to generate sequence number
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_orders = SandboxOrders.query.filter(
-            SandboxOrders.user_id == self.user_id,
-            SandboxOrders.order_timestamp >= today_start
-        ).count()
+        # Use microseconds (0-999999) + random (0-99) for 8-digit unique sequence
+        # This avoids race conditions when parallel orders query count simultaneously
+        micro = now.microsecond
+        rand_suffix = random.randint(0, 99)
 
-        # Sequence is orders count + 1, padded to 8 digits
-        sequence = str(today_orders + 1).zfill(8)
+        # Combine: first 6 digits from microseconds, last 2 from random
+        sequence = f"{micro:06d}{rand_suffix:02d}"
 
         return f"{date_prefix}{sequence}"
 

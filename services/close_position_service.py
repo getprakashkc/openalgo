@@ -41,11 +41,15 @@ def emit_analyzer_error(request_data: Dict[str, Any], error_message: str) -> Dic
     # Log to analyzer database
     executor.submit(async_log_analyzer, analyzer_request, error_response, 'closeposition')
     
-    # Emit socket event
-    socketio.emit('analyzer_update', {
+    # Emit socket event asynchronously (non-blocking)
+    socketio.start_background_task(
+        socketio.emit,
+        'analyzer_update',
+        {
         'request': analyzer_request,
         'response': error_response
-    })
+    }
+    )
     
     return error_response
 
@@ -152,14 +156,22 @@ def close_position_with_auth(
             'status': 'success',
             'message': 'All Open Positions Squared Off'
         }
-        socketio.emit('close_position_event', {
-            'status': 'success',
-            'message': 'All Open Positions Squared Off',
-            'mode': 'live'
-        })
+        # Emit SocketIO event asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'close_position_event',
+            {
+                'status': 'success',
+                'message': 'All Open Positions Squared Off',
+                'mode': 'live'
+            }
+        )
         executor.submit(async_log_order, 'closeposition', position_request_data, response_data)
-        # Send Telegram alert for live mode
-        telegram_alert_service.send_order_alert('closeposition', position_data, response_data, position_data.get('apikey'))
+        # Send Telegram alert in background task (non-blocking)
+        socketio.start_background_task(
+            telegram_alert_service.send_order_alert,
+            'closeposition', position_data, response_data, original_data.get('apikey')
+        )
         return True, response_data, 200
     else:
         message = response_code.get('message', 'Failed to close positions') if isinstance(response_code, dict) else 'Failed to close positions'
@@ -201,9 +213,27 @@ def close_position(
     
     # Case 1: API-based authentication
     if api_key and not (auth_token and broker):
+        # Check if user is in semi-auto mode (closeposition is blocked in semi-auto)
+        # BUT allow execution in analyze/sandbox mode (virtual trading should always work)
+        from database.auth_db import verify_api_key, get_order_mode
+
+        # Check analyze mode first - if in analyze mode, allow execution
+        if not get_analyze_mode():
+            user_id = verify_api_key(api_key)
+            if user_id:
+                order_mode = get_order_mode(user_id)
+                if order_mode == 'semi_auto':
+                    error_response = {
+                        'status': 'error',
+                        'message': 'Close position operation is not allowed in Semi-Auto mode. Please switch to Auto mode to close positions.'
+                    }
+                    logger.warning(f"Close position blocked for user {user_id} (semi-auto mode)")
+                    executor.submit(async_log_order, 'closeposition', original_data, error_response)
+                    return False, error_response, 403
+
         # Add API key to position data
         position_data['apikey'] = api_key
-        
+
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
             error_response = {
@@ -212,7 +242,7 @@ def close_position(
             }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
-        
+
         return close_position_with_auth(position_data, AUTH_TOKEN, broker_name, original_data)
     
     # Case 2: Direct internal call with auth_token and broker

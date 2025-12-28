@@ -98,7 +98,7 @@ def check_env_version_compatibility():
             print(f"\n✅ Your .env version ({env_version}) is newer than sample ({sample_version})")
             
         else:
-            print(f"\n✅ Configuration version check passed ({env_version})")
+            print(f"\n\033[94m🔄\033[0m Configuration version check passed (\033[92m{env_version}\033[0m)")
             
     except Exception as e:
         print(f"\nWarning: Could not parse version numbers: {e}")

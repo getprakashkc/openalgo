@@ -288,32 +288,48 @@ def holdings():
 @limiter.limit(API_RATE_LIMIT)
 def export_orderbook():
     try:
-        broker = session.get('broker')
-        if not broker:
-            logger.error("Broker not set in session")
-            return "Broker not set in session", 400
-
-        api_funcs = dynamic_import(broker, 'api.order_api', ['get_order_book'])
-        mapping_funcs = dynamic_import(broker, 'mapping.order_data', ['map_order_data', 'transform_order_data'])
-
-        if not api_funcs or not mapping_funcs:
-            logger.error(f"Error loading broker-specific modules for {broker}")
-            return "Error loading broker-specific modules", 500
-
         login_username = session['user']
         auth_token = get_auth_token(login_username)
+        broker = session.get('broker')
 
         if auth_token is None:
             logger.warning(f"No auth token found for user {login_username}")
             return redirect(url_for('auth.logout'))
 
-        order_data = api_funcs['get_order_book'](auth_token)
-        if 'status' in order_data and order_data['status'] == 'error':
-            logger.error("Error in order data response")
-            return redirect(url_for('auth.logout'))
+        # Check if in analyze mode and route accordingly
+        if get_analyze_mode():
+            # Get API key for sandbox mode
+            api_key = get_api_key_for_tradingview(login_username)
+            if api_key:
+                success, response, status_code = get_orderbook(api_key=api_key)
+                if not success:
+                    logger.error(f"Failed to get orderbook data in analyze mode")
+                    return "Error getting orderbook data", 500
+                data = response.get('data', {})
+                order_data = data.get('orders', [])
+            else:
+                logger.error("No API key found for analyze mode")
+                return "API key required for analyze mode", 400
+        else:
+            # Use live broker
+            if not broker:
+                logger.error("Broker not set in session")
+                return "Broker not set in session", 400
 
-        order_data = mapping_funcs['map_order_data'](order_data=order_data)
-        order_data = mapping_funcs['transform_order_data'](order_data)
+            api_funcs = dynamic_import(broker, 'api.order_api', ['get_order_book'])
+            mapping_funcs = dynamic_import(broker, 'mapping.order_data', ['map_order_data', 'transform_order_data'])
+
+            if not api_funcs or not mapping_funcs:
+                logger.error(f"Error loading broker-specific modules for {broker}")
+                return "Error loading broker-specific modules", 500
+
+            order_data = api_funcs['get_order_book'](auth_token)
+            if 'status' in order_data and order_data['status'] == 'error':
+                logger.error("Error in order data response")
+                return redirect(url_for('auth.logout'))
+
+            order_data = mapping_funcs['map_order_data'](order_data=order_data)
+            order_data = mapping_funcs['transform_order_data'](order_data)
 
         csv_data = generate_orderbook_csv(order_data)
         return Response(
@@ -330,32 +346,47 @@ def export_orderbook():
 @limiter.limit(API_RATE_LIMIT)
 def export_tradebook():
     try:
-        broker = session.get('broker')
-        if not broker:
-            logger.error("Broker not set in session")
-            return "Broker not set in session", 400
-
-        api_funcs = dynamic_import(broker, 'api.order_api', ['get_trade_book'])
-        mapping_funcs = dynamic_import(broker, 'mapping.order_data', ['map_trade_data', 'transform_tradebook_data'])
-
-        if not api_funcs or not mapping_funcs:
-            logger.error(f"Error loading broker-specific modules for {broker}")
-            return "Error loading broker-specific modules", 500
-
         login_username = session['user']
         auth_token = get_auth_token(login_username)
+        broker = session.get('broker')
 
         if auth_token is None:
             logger.warning(f"No auth token found for user {login_username}")
             return redirect(url_for('auth.logout'))
 
-        tradebook_data = api_funcs['get_trade_book'](auth_token)
-        if 'status' in tradebook_data and tradebook_data['status'] == 'error':
-            logger.error("Error in tradebook data response")
-            return redirect(url_for('auth.logout'))
+        # Check if in analyze mode and route accordingly
+        if get_analyze_mode():
+            # Get API key for sandbox mode
+            api_key = get_api_key_for_tradingview(login_username)
+            if api_key:
+                success, response, status_code = get_tradebook(api_key=api_key)
+                if not success:
+                    logger.error(f"Failed to get tradebook data in analyze mode")
+                    return "Error getting tradebook data", 500
+                tradebook_data = response.get('data', [])
+            else:
+                logger.error("No API key found for analyze mode")
+                return "API key required for analyze mode", 400
+        else:
+            # Use live broker
+            if not broker:
+                logger.error("Broker not set in session")
+                return "Broker not set in session", 400
 
-        tradebook_data = mapping_funcs['map_trade_data'](tradebook_data)
-        tradebook_data = mapping_funcs['transform_tradebook_data'](tradebook_data)
+            api_funcs = dynamic_import(broker, 'api.order_api', ['get_trade_book'])
+            mapping_funcs = dynamic_import(broker, 'mapping.order_data', ['map_trade_data', 'transform_tradebook_data'])
+
+            if not api_funcs or not mapping_funcs:
+                logger.error(f"Error loading broker-specific modules for {broker}")
+                return "Error loading broker-specific modules", 500
+
+            tradebook_data = api_funcs['get_trade_book'](auth_token)
+            if 'status' in tradebook_data and tradebook_data['status'] == 'error':
+                logger.error("Error in tradebook data response")
+                return redirect(url_for('auth.logout'))
+
+            tradebook_data = mapping_funcs['map_trade_data'](tradebook_data)
+            tradebook_data = mapping_funcs['transform_tradebook_data'](tradebook_data)
 
         csv_data = generate_tradebook_csv(tradebook_data)
         return Response(
@@ -372,34 +403,49 @@ def export_tradebook():
 @limiter.limit(API_RATE_LIMIT)
 def export_positions():
     try:
-        broker = session.get('broker')
-        if not broker:
-            logger.error("Broker not set in session")
-            return "Broker not set in session", 400
-
-        api_funcs = dynamic_import(broker, 'api.order_api', ['get_positions'])
-        mapping_funcs = dynamic_import(broker, 'mapping.order_data', [
-            'map_position_data', 'transform_positions_data'
-        ])
-
-        if not api_funcs or not mapping_funcs:
-            logger.error(f"Error loading broker-specific modules for {broker}")
-            return "Error loading broker-specific modules", 500
-
         login_username = session['user']
         auth_token = get_auth_token(login_username)
+        broker = session.get('broker')
 
         if auth_token is None:
             logger.warning(f"No auth token found for user {login_username}")
             return redirect(url_for('auth.logout'))
 
-        positions_data = api_funcs['get_positions'](auth_token)
-        if 'status' in positions_data and positions_data['status'] == 'error':
-            logger.error("Error in positions data response")
-            return redirect(url_for('auth.logout'))
+        # Check if in analyze mode and route accordingly
+        if get_analyze_mode():
+            # Get API key for sandbox mode
+            api_key = get_api_key_for_tradingview(login_username)
+            if api_key:
+                success, response, status_code = get_positionbook(api_key=api_key)
+                if not success:
+                    logger.error(f"Failed to get positions data in analyze mode")
+                    return "Error getting positions data", 500
+                positions_data = response.get('data', [])
+            else:
+                logger.error("No API key found for analyze mode")
+                return "API key required for analyze mode", 400
+        else:
+            # Use live broker
+            if not broker:
+                logger.error("Broker not set in session")
+                return "Broker not set in session", 400
 
-        positions_data = mapping_funcs['map_position_data'](positions_data)
-        positions_data = mapping_funcs['transform_positions_data'](positions_data)
+            api_funcs = dynamic_import(broker, 'api.order_api', ['get_positions'])
+            mapping_funcs = dynamic_import(broker, 'mapping.order_data', [
+                'map_position_data', 'transform_positions_data'
+            ])
+
+            if not api_funcs or not mapping_funcs:
+                logger.error(f"Error loading broker-specific modules for {broker}")
+                return "Error loading broker-specific modules", 500
+
+            positions_data = api_funcs['get_positions'](auth_token)
+            if 'status' in positions_data and positions_data['status'] == 'error':
+                logger.error("Error in positions data response")
+                return redirect(url_for('auth.logout'))
+
+            positions_data = mapping_funcs['map_position_data'](positions_data)
+            positions_data = mapping_funcs['transform_positions_data'](positions_data)
 
         csv_data = generate_positions_csv(positions_data)
         return Response(
@@ -651,3 +697,217 @@ def cancel_all_orders_ui():
             'status': 'error',
             'message': f'An error occurred: {str(e)}'
         }), 500
+
+@orders_bp.route('/action-center')
+@check_session_validity
+@limiter.limit(API_RATE_LIMIT)
+def action_center():
+    """
+    Action Center - Manage pending semi-automated orders
+    Similar to orderbook but for pending approval orders
+    """
+    login_username = session['user']
+
+    # Get filter from query params
+    status_filter = request.args.get('status', 'pending')  # pending, approved, rejected, all
+
+    # Get action center data
+    from services.action_center_service import get_action_center_data
+
+    if status_filter == 'all':
+        success, response, status_code = get_action_center_data(login_username, status_filter=None)
+    else:
+        success, response, status_code = get_action_center_data(login_username, status_filter=status_filter)
+
+    if not success:
+        logger.error(f"Failed to get action center data: {response.get('message', 'Unknown error')}")
+        return render_template('action_center.html',
+                             order_data=[],
+                             order_stats={},
+                             current_filter=status_filter,
+                             login_username=login_username)
+
+    data = response.get('data', {})
+    order_data = data.get('orders', [])
+    order_stats = data.get('statistics', {})
+
+    return render_template('action_center.html',
+                         order_data=order_data,
+                         order_stats=order_stats,
+                         current_filter=status_filter,
+                         login_username=login_username)
+
+@orders_bp.route('/action-center/approve/<int:order_id>', methods=['POST'])
+@check_session_validity
+@limiter.limit(API_RATE_LIMIT)
+def approve_pending_order_route(order_id):
+    """Approve a pending order and execute it"""
+    login_username = session['user']
+
+    from database.action_center_db import approve_pending_order
+    from services.pending_order_execution_service import execute_approved_order
+    from extensions import socketio
+
+    # Approve the order
+    success = approve_pending_order(order_id, approved_by=login_username, user_id=login_username)
+
+    if success:
+        # Execute the order
+        exec_success, response_data, status_code = execute_approved_order(order_id)
+
+        # Emit socket event to notify about order approval
+        socketio.emit('pending_order_updated', {
+            'action': 'approved',
+            'order_id': order_id,
+            'user_id': login_username
+        })
+
+        if exec_success:
+            return jsonify({
+                'status': 'success',
+                'message': 'Order approved and executed successfully',
+                'broker_order_id': response_data.get('orderid')
+            })
+        else:
+            return jsonify({
+                'status': 'warning',
+                'message': 'Order approved but execution failed',
+                'error': response_data.get('message')
+            }), status_code
+    else:
+        return jsonify({'status': 'error', 'message': 'Failed to approve order'}), 400
+
+@orders_bp.route('/action-center/reject/<int:order_id>', methods=['POST'])
+@check_session_validity
+@limiter.limit(API_RATE_LIMIT)
+def reject_pending_order_route(order_id):
+    """Reject a pending order"""
+    login_username = session['user']
+    data = request.json
+    reason = data.get('reason', 'No reason provided')
+
+    from database.action_center_db import reject_pending_order
+    from extensions import socketio
+
+    success = reject_pending_order(order_id, reason=reason, rejected_by=login_username, user_id=login_username)
+
+    if success:
+        # Emit socket event to notify about order rejection
+        socketio.emit('pending_order_updated', {
+            'action': 'rejected',
+            'order_id': order_id,
+            'user_id': login_username
+        })
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Order rejected successfully'
+        })
+    else:
+        return jsonify({'status': 'error', 'message': 'Failed to reject order'}), 400
+
+@orders_bp.route('/action-center/delete/<int:order_id>', methods=['DELETE'])
+@check_session_validity
+@limiter.limit(API_RATE_LIMIT)
+def delete_pending_order_route(order_id):
+    """Delete a pending order (only if not pending)"""
+    login_username = session['user']
+
+    from database.action_center_db import delete_pending_order
+    from extensions import socketio
+
+    success = delete_pending_order(order_id, user_id=login_username)
+
+    if success:
+        # Emit socket event to notify about order deletion
+        socketio.emit('pending_order_updated', {
+            'action': 'deleted',
+            'order_id': order_id,
+            'user_id': login_username
+        })
+
+        return jsonify({'status': 'success', 'message': 'Order deleted successfully'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Failed to delete order'}), 400
+
+@orders_bp.route('/action-center/count')
+@check_session_validity
+def action_center_count():
+    """Get count of pending orders for badge"""
+    login_username = session['user']
+
+    from database.action_center_db import get_pending_count
+
+    count = get_pending_count(login_username)
+
+    return jsonify({'count': count})
+
+@orders_bp.route('/action-center/approve-all', methods=['POST'])
+@check_session_validity
+@limiter.limit(API_RATE_LIMIT)
+def approve_all_pending_orders():
+    """Approve and execute all pending orders"""
+    login_username = session['user']
+
+    from database.action_center_db import get_pending_orders, approve_pending_order
+    from services.pending_order_execution_service import execute_approved_order
+    from extensions import socketio
+
+    # Get all pending orders for this user
+    pending_orders = get_pending_orders(login_username, status='pending')
+
+    if not pending_orders:
+        return jsonify({
+            'status': 'info',
+            'message': 'No pending orders to approve'
+        }), 200
+
+    # Track results
+    approved_count = 0
+    executed_count = 0
+    failed_executions = []
+
+    # Approve and execute each order
+    for order in pending_orders:
+        # Approve the order
+        success = approve_pending_order(order.id, approved_by=login_username)
+
+        if success:
+            approved_count += 1
+
+            # Execute the order
+            exec_success, response_data, status_code = execute_approved_order(order.id)
+
+            if exec_success:
+                executed_count += 1
+            else:
+                failed_executions.append({
+                    'order_id': order.id,
+                    'error': response_data.get('message', 'Unknown error')
+                })
+
+    # Emit socket event to notify about batch approval
+    socketio.emit('pending_order_updated', {
+        'action': 'batch_approved',
+        'user_id': login_username,
+        'count': approved_count
+    })
+
+    # Prepare response message
+    if approved_count == executed_count:
+        message = f'Successfully approved and executed all {approved_count} orders'
+        status = 'success'
+    elif executed_count > 0:
+        message = f'Approved {approved_count} orders. {executed_count} executed successfully, {len(failed_executions)} failed'
+        status = 'warning'
+    else:
+        message = f'Approved {approved_count} orders but all executions failed'
+        status = 'error'
+
+    return jsonify({
+        'status': status,
+        'message': message,
+        'approved_count': approved_count,
+        'executed_count': executed_count,
+        'failed_executions': failed_executions
+    }), 200

@@ -37,6 +37,10 @@ def broker_callback(broker,para=None):
         # For Compositedge OAuth callback, we'll handle authentication differently
         # The session will be established after successful auth token validation
         logger.info("Compositedge callback without session - will establish session after auth")
+    # Special handling for mstock POST - check session but provide better error instead of redirect
+    elif broker == 'mstock' and request.method == 'POST' and 'user' not in session:
+        # Redirect to broker selection page with error message instead of login
+        return redirect(url_for('auth.broker_login'))
     else:
         # Check if user is not in session first for other brokers
         if 'user' not in session:
@@ -81,6 +85,38 @@ def broker_callback(broker,para=None):
             user_id = clientcode
             auth_token, feed_token, error_message = auth_function(clientcode, broker_pin, totp_code)
             forward_url = 'angel.html'
+
+    elif broker == 'mstock':
+        if request.method == 'GET':
+            return render_template('mstock.html')
+
+        elif request.method == 'POST':
+            # Check if user session is lost
+            if 'user' not in session:
+                logger.error(f'mstock POST - Session lost! Cookies: {request.cookies}')
+                return render_template('mstock.html', error_message="Session expired. Please login again.")
+
+            # Import mstock TOTP authentication function
+            from broker.mstock.api.auth_api import authenticate_with_totp
+
+            # Get password and TOTP from form
+            password = request.form.get('password')
+            totp_code = request.form.get('totp')
+
+            if not password:
+                return render_template('mstock.html', error_message="Password is required.")
+            if not totp_code:
+                return render_template('mstock.html', error_message="TOTP code is required.")
+
+            # Single-step authentication with password + TOTP
+            auth_token, feed_token, error_message = authenticate_with_totp(password, totp_code)
+
+            if error_message:
+                return render_template('mstock.html', error_message=error_message)
+
+            # Authentication successful, redirect to dashboard
+            logger.info("mStock TOTP authentication successful, redirecting to dashboard")
+            return handle_auth_success(auth_token, session['user'], broker, feed_token=feed_token, user_id=None)
     
     elif broker == 'aliceblue':
         if request.method == 'GET':
@@ -263,6 +299,14 @@ def broker_callback(broker,para=None):
         auth_token, feed_token, user_id, error_message = auth_function(code)
         forward_url = 'broker.html'
 
+    elif broker=='jainamxts':
+        code = 'jainamxts'
+        logger.debug(f'JainamXTS broker - code: {code}')  
+               
+        # Fetch auth token, feed token and user ID
+        auth_token, feed_token, user_id, error_message = auth_function(code)
+        forward_url = 'broker.html'
+
     elif broker=='dhan':
         auth_token = None
         error_message = None
@@ -408,6 +452,16 @@ def broker_callback(broker,para=None):
             auth_token, error_message = auth_function(userid, password, totp_code)
             forward_url = 'firstock.html'
 
+    elif broker == 'samco':
+        if request.method == 'GET':
+            return render_template('samco.html')
+
+        elif request.method == 'POST':
+            yob = request.form.get('yob')
+
+            auth_token, error_message = auth_function(yob)
+            forward_url = 'samco.html'
+
     elif broker == 'motilal':
         if request.method == 'GET':
             return render_template('motilal.html')
@@ -432,17 +486,28 @@ def broker_callback(broker,para=None):
         logger.debug(f"Kotak broker - The Broker is {broker}")
         if request.method == 'GET':
             return render_template('kotak.html')
-        
+
         elif request.method == 'POST':
-            otp = request.form.get('otp')
-            token = request.form.get('token')
-            sid = request.form.get('sid')
-            userid = request.form.get('userid')
-            access_token = request.form.get('access_token')
-            hsServerId = request.form.get('hsServerId')
-            
-            auth_token, error_message = auth_function(otp,token,sid,userid,access_token,hsServerId)
+            # New TOTP authentication flow
+            mobile_number = request.form.get('mobilenumber')
+            totp = request.form.get('totp')
+            mpin = request.form.get('mpin')
+
+            # Validate inputs
+            if not mobile_number or not totp or not mpin:
+                error_message = "Please provide Mobile Number, TOTP, and MPIN"
+                return render_template('kotak.html', error_message=error_message)
+
+            logger.info(f"Kotak TOTP authentication initiated for mobile: {mobile_number[:5]}***")
+
+            # Call the new authenticate_broker function
+            auth_token, error_message = auth_function(mobile_number, totp, mpin)
             forward_url = 'kotak.html'
+
+            if auth_token:
+                logger.info(f"Kotak authentication successful, auth_token received")
+            else:
+                logger.error(f"Kotak authentication failed: {error_message}")
 
     elif broker == 'paytm':
          request_token = request.args.get('requestToken')
@@ -661,105 +726,11 @@ def dhan_initiate_oauth():
         logger.error(error_message)
         return handle_auth_failure(error_message, forward_url='broker.html')
 
-@brlogin_bp.route('/<broker>/loginflow', methods=['POST','GET'])
-@limiter.limit(LOGIN_RATE_LIMIT_MIN)
-@limiter.limit(LOGIN_RATE_LIMIT_HOUR)
-def broker_loginflow(broker):
-    # Check if user is not in session first
-    if 'user' not in session:
-        return redirect(url_for('auth.login'))
-
-    if broker == 'kotak':
-        # Get form data
-        mobile_number = request.form.get('mobilenumber', '')
-        password = request.form.get('password')
-
-        # Strip any existing prefix and add +91
-        mobile_number = mobile_number.replace('+91', '').strip()
-        if not mobile_number.startswith('+91'):
-            mobile_number = f'+91{mobile_number}'
-        
-        # First get the access token
-        api_secret = get_broker_api_secret()
-        auth_string = base64.b64encode(f"{BROKER_API_KEY}:{api_secret}".encode()).decode('utf-8')
-        # Define the connection
-        conn = http.client.HTTPSConnection("napi.kotaksecurities.com")
-
-        # Define the payload
-        payload = json.dumps({
-            'grant_type': 'client_credentials'
-        })
-
-        # Define the headers with Basic Auth
-        headers = {
-            'accept': '*/*',
-            'Content-Type': 'application/json',
-            'Authorization': f'Basic {auth_string}'
-        }
-
-        # Make API request
-        conn.request("POST", "/oauth2/token", payload, headers)
-
-        # Get the response
-        res = conn.getresponse()
-        data = json.loads(res.read().decode("utf-8"))
-
-        if 'access_token' in data:
-            access_token = data['access_token']
-            # Login with mobile number and password
-            conn = http.client.HTTPSConnection("gw-napi.kotaksecurities.com")
-            payload = json.dumps({
-                "mobileNumber": mobile_number,
-                "password": password
-            })
-            headers = {
-                'accept': '*/*',
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {access_token}'
-            }
-            conn.request("POST", "/login/1.0/login/v2/validate", payload, headers)
-            res = conn.getresponse()
-            data = res.read().decode("utf-8")
-
-            data_dict = json.loads(data)
-
-            if 'data' in data_dict:
-                token = data_dict['data']['token']
-                sid = data_dict['data']['sid']
-                hsServerId = data_dict['data']['hsServerId']
-                decode_jwt = jwt.decode(token, options={"verify_signature": False})
-                userid = decode_jwt.get("sub")
-
-                para = {
-                    "access_token": access_token,
-                    "token": token,
-                    "sid": sid,
-                    "hsServerId": hsServerId,
-                    "userid": userid
-                }
-                getKotakOTP(userid, access_token)
-                return render_template('kotakotp.html', para=para)
-            else:
-                error_message = data_dict.get('message', 'Unknown error occurred')
-                return render_template('kotak.html', error_message=error_message)
-        
-    return
-
-
-def getKotakOTP(userid,access_token):
-    conn = http.client.HTTPSConnection("gw-napi.kotaksecurities.com")
-    payload = json.dumps({
-    "userId": userid,
-    "sendEmail": True,
-    "isWhitelisted": True
-    })
-    headers = {
-    'accept': '*/*',
-    'Content-Type': 'application/json',
-    'Authorization': f'Bearer {access_token}'
-    }
-    conn.request("POST", "/login/1.0/login/otp/generate", payload, headers)
-    res = conn.getresponse()
-    data = res.read()
-    
-    return 'success'
+# Old Kotak SMS OTP flow - deprecated in favor of TOTP authentication
+# Keeping this commented for reference if needed
+# @brlogin_bp.route('/<broker>/loginflow', methods=['POST','GET'])
+# @limiter.limit(LOGIN_RATE_LIMIT_MIN)
+# @limiter.limit(LOGIN_RATE_LIMIT_HOUR)
+# def broker_loginflow(broker):
+#     # This function is no longer used for Kotak TOTP authentication
+#     pass

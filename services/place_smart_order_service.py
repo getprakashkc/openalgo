@@ -51,13 +51,17 @@ def emit_analyzer_error(request_data: Dict[str, Any], error_message: str) -> Dic
     
     # Log to analyzer database
     executor.submit(async_log_analyzer, analyzer_request, error_response, 'placesmartorder')
-    
-    # Emit socket event
-    socketio.emit('analyzer_update', {
-        'request': analyzer_request,
-        'response': error_response
-    })
-    
+
+    # Emit socket event asynchronously (non-blocking)
+    socketio.start_background_task(
+        socketio.emit,
+        'analyzer_update',
+        {
+            'request': analyzer_request,
+            'response': error_response
+        }
+    )
+
     return error_response
 
 def import_broker_module(broker_name: str) -> Optional[Any]:
@@ -173,14 +177,21 @@ def place_smart_order_with_auth(
         # Log to analyzer database with complete request and response
         executor.submit(async_log_analyzer, analyzer_request, response_data, 'placesmartorder')
 
-        # Emit socket event for toast notification
-        socketio.emit('analyzer_update', {
-            'request': analyzer_request,
-            'response': response_data
-        })
+        # Emit socket event for toast notification asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'analyzer_update',
+            {
+                'request': analyzer_request,
+                'response': response_data
+            }
+        )
 
-        # Send Telegram alert for analyze mode
-        telegram_alert_service.send_order_alert('placesmartorder', order_data, response_data, order_data.get('apikey'))
+        # Send Telegram alert in background task (non-blocking)
+        socketio.start_background_task(
+            telegram_alert_service.send_order_alert,
+            'placesmartorder', order_data, response_data, order_data.get('apikey')
+        )
         return success, response_data, status_code
 
     # Live Mode - Proceed with actual order placement
@@ -204,29 +215,44 @@ def place_smart_order_with_auth(
                 'message': 'Positions Already Matched. No Action needed.'
             }
             executor.submit(async_log_order, 'placesmartorder', order_request_data, order_response_data)
-            
-            # Emit notification for matched positions
-            socketio.emit('order_notification', {
-                'symbol': order_data.get('symbol'),
-                'status': 'info',
-                'message': ' Positions Already Matched. No Action needed.'
-            })
-            # Send Telegram alert
-            telegram_alert_service.send_order_alert('placesmartorder', order_data, order_response_data, order_data.get('apikey'))
+
+            # Emit notification for matched positions asynchronously (non-blocking)
+            socketio.start_background_task(
+                socketio.emit,
+                'order_notification',
+                {
+                    'symbol': order_data.get('symbol'),
+                    'status': 'info',
+                    'message': ' Positions Already Matched. No Action needed.'
+                }
+            )
+            # Send Telegram alert in background task (non-blocking)
+            socketio.start_background_task(
+                telegram_alert_service.send_order_alert,
+                'placesmartorder', order_data, order_response_data, original_data.get('apikey')
+            )
             return True, order_response_data, 200
 
         # Log successful order immediately after placement
         if res and res.status == 200:
             order_response_data = {'status': 'success', 'orderid': order_id}
             executor.submit(async_log_order, 'placesmartorder', order_request_data, order_response_data)
-            # Send Telegram alert
-            telegram_alert_service.send_order_alert('placesmartorder', order_data, order_response_data, order_data.get('apikey'))
-            socketio.emit('order_event', {
-                'symbol': order_data.get('symbol'),
-                'action': order_data.get('action'),
-                'orderid': order_id,
-                'mode': 'live'
-            })
+            # Send Telegram alert in background task (non-blocking)
+            socketio.start_background_task(
+                telegram_alert_service.send_order_alert,
+                'placesmartorder', order_data, order_response_data, original_data.get('apikey')
+            )
+            # Emit SocketIO event asynchronously (non-blocking)
+            socketio.start_background_task(
+                socketio.emit,
+                'order_event',
+                {
+                    'symbol': order_data.get('symbol'),
+                    'action': order_data.get('action'),
+                    'orderid': order_id,
+                    'mode': 'live'
+                }
+            )
         
     except Exception as e:
         logger.error(f"Error in broker_module.place_smartorder_api: {e}")
@@ -288,12 +314,19 @@ def place_smart_order(
     # Use default delay if not provided
     if smart_order_delay is None:
         smart_order_delay = SMART_ORDER_DELAY
-    
+
+    # Add API key to order data if provided (needed for validation)
+    if api_key:
+        order_data['apikey'] = api_key
+
     # Case 1: API-based authentication
     if api_key and not (auth_token and broker):
-        # Add API key to order data
-        order_data['apikey'] = api_key
-        
+        # Check if order should be routed to Action Center (semi-auto mode)
+        from services.order_router_service import should_route_to_pending, queue_order
+
+        if should_route_to_pending(api_key, 'smartorder'):
+            return queue_order(api_key, original_data, 'smartorder')
+
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
             error_response = {
@@ -302,7 +335,7 @@ def place_smart_order(
             }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
-        
+
         return place_smart_order_with_auth(order_data, AUTH_TOKEN, broker_name, original_data, smart_order_delay)
     
     # Case 2: Direct internal call with auth_token and broker

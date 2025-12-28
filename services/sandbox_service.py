@@ -99,14 +99,21 @@ def sandbox_place_order(
         # Log to analyzer database
         executor.submit(async_log_analyzer, log_request, response, 'placeorder')
 
-        # Emit socket event
-        socketio.emit('analyzer_update', {
+        # Emit socket event asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'analyzer_update',
+            {
             'request': log_request,
             'response': response
-        })
+        }
+        )
 
-        # Send Telegram alert
-        telegram_alert_service.send_order_alert('placeorder', order_data, response, api_key)
+        # Send Telegram alert in background task (non-blocking)
+        socketio.start_background_task(
+            telegram_alert_service.send_order_alert,
+            'placeorder', order_data, response, api_key
+        )
 
         return success, response, status_code
 
@@ -155,7 +162,12 @@ def sandbox_modify_order(
         log_request['api_type'] = 'modifyorder'
 
         executor.submit(async_log_analyzer, log_request, response, 'modifyorder')
-        socketio.emit('analyzer_update', {'request': log_request, 'response': response})
+        # Emit SocketIO event asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'analyzer_update',
+            {'request': log_request, 'response': response}
+        )
 
         return success, response, status_code
 
@@ -195,7 +207,12 @@ def sandbox_cancel_order(
         log_request['api_type'] = 'cancelorder'
 
         executor.submit(async_log_analyzer, log_request, response, 'cancelorder')
-        socketio.emit('analyzer_update', {'request': log_request, 'response': response})
+        # Emit SocketIO event asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'analyzer_update',
+            {'request': log_request, 'response': response}
+        )
 
         return success, response, status_code
 
@@ -490,7 +507,7 @@ def sandbox_place_smart_order(
 
         symbol = order_data.get('symbol')
         exchange = order_data.get('exchange')
-        product = order_data.get('product_type', 'MIS')
+        product = order_data.get('product') or order_data.get('product_type', 'MIS')
         target_quantity = int(order_data.get('position_size', 0))
         original_quantity = int(order_data.get('quantity', 0))
         original_action = order_data.get('action')
@@ -712,5 +729,72 @@ def sandbox_get_squareoff_status() -> Tuple[bool, Dict[str, Any], int]:
         return False, {
             'status': 'error',
             'message': f'Error getting status: {str(e)}',
+            'mode': 'analyze'
+        }, 500
+
+
+def sandbox_get_pnl_symbols(
+    api_key: str,
+    original_data: Dict[str, Any]
+) -> Tuple[bool, Dict[str, Any], int]:
+    """
+    Get day P&L breakdown by symbol in sandbox mode.
+    Returns unrealized P&L, today's realized P&L, and total P&L for today per symbol.
+
+    Args:
+        api_key: OpenAlgo API key
+        original_data: Original request data
+
+    Returns:
+        Tuple containing:
+        - Success status (bool)
+        - Response data (dict)
+        - HTTP status code (int)
+    """
+    try:
+        user_id = get_user_id_from_apikey(api_key)
+        if not user_id:
+            return False, {
+                'status': 'error',
+                'message': 'Invalid API key',
+                'mode': 'analyze'
+            }, 403
+
+        position_manager = PositionManager(user_id)
+        success, positions_response, status_code = position_manager.get_open_positions()
+
+        if not success:
+            return False, positions_response, status_code
+
+        positions = positions_response.get('data', [])
+
+        pnl_symbols = []
+        for pos in positions:
+            pnl_symbols.append({
+                'symbol': pos['symbol'],
+                'exchange': pos['exchange'],
+                'product': pos['product'],
+                'quantity': pos['quantity'],
+                'pnl': pos.get('pnl', 0),  # Today's total (realized + unrealized)
+                'unrealized_pnl': pos.get('unrealized_pnl', 0),
+                'today_realized_pnl': pos.get('today_realized_pnl', 0),
+                'total_pnl_today': pos.get('total_pnl_today', 0),
+            })
+
+        return True, {
+            'status': 'success',
+            'data': pnl_symbols,
+            'total_pnl': positions_response.get('total_pnl', 0),  # Today's total
+            'total_unrealized_pnl': positions_response.get('total_unrealized_pnl', 0),
+            'total_today_realized_pnl': positions_response.get('total_today_realized_pnl', 0),
+            'total_pnl_today': positions_response.get('total_pnl_today', 0),
+            'mode': 'analyze'
+        }, 200
+
+    except Exception as e:
+        logger.error(f"Error in sandbox_get_pnl_symbols: {e}")
+        return False, {
+            'status': 'error',
+            'message': f'Error getting PnL by symbols: {str(e)}',
             'mode': 'analyze'
         }, 500

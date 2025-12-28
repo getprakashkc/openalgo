@@ -68,13 +68,17 @@ def emit_analyzer_error(request_data: Dict[str, Any], error_message: str) -> Dic
     
     # Log to analyzer database
     executor.submit(async_log_analyzer, analyzer_request, error_response, 'placeorder')
-    
-    # Emit socket event
-    socketio.emit('analyzer_update', {
-        'request': analyzer_request,
-        'response': error_response
-    })
-    
+
+    # Emit socket event asynchronously (non-blocking)
+    socketio.start_background_task(
+        socketio.emit,
+        'analyzer_update',
+        {
+            'request': analyzer_request,
+            'response': error_response
+        }
+    )
+
     return error_response
 
 def validate_order_data(data: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
@@ -121,20 +125,22 @@ def validate_order_data(data: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, 
         return False, None, str(err)
 
 def place_order_with_auth(
-    order_data: Dict[str, Any], 
-    auth_token: str, 
+    order_data: Dict[str, Any],
+    auth_token: str,
     broker: str,
-    original_data: Dict[str, Any]
+    original_data: Dict[str, Any],
+    emit_event: bool = True
 ) -> Tuple[bool, Dict[str, Any], int]:
     """
     Place an order using provided auth token.
-    
+
     Args:
         order_data: Validated order data
         auth_token: Authentication token for the broker API
         broker: Name of the broker
         original_data: Original request data for logging
-        
+        emit_event: Whether to emit socket event (default True, set False for batch orders)
+
     Returns:
         Tuple containing:
         - Success status (bool)
@@ -186,19 +192,30 @@ def place_order_with_auth(
         return False, error_response, 500
 
     if res.status == 200:
-        socketio.emit('order_event', {
-            'symbol': order_data['symbol'],
-            'action': order_data['action'],
-            'orderid': order_id,
-            'exchange': order_data.get('exchange', 'Unknown'),
-            'price_type': order_data.get('price_type', 'Unknown'),
-            'product_type': order_data.get('product_type', 'Unknown'),
-            'mode': 'live'
-        })
+        # Emit SocketIO event asynchronously (non-blocking)
+        # Skip event emission for batch orders (they emit a summary event at the end)
+        if emit_event:
+            socketio.start_background_task(
+                socketio.emit,
+                'order_event',
+                {
+                    'symbol': order_data['symbol'],
+                    'action': order_data['action'],
+                    'orderid': order_id,
+                    'exchange': order_data.get('exchange', 'Unknown'),
+                    'price_type': order_data.get('price_type', 'Unknown'),
+                    'product_type': order_data.get('product_type', 'Unknown'),
+                    'mode': 'live'
+                }
+            )
         order_response_data = {'status': 'success', 'orderid': order_id}
         executor.submit(async_log_order, 'placeorder', order_request_data, order_response_data)
-        # Send Telegram alert asynchronously
-        telegram_alert_service.send_order_alert('placeorder', order_data, order_response_data, order_data.get('apikey'))
+        # Send Telegram alert in background task (non-blocking)
+        # Moves DB lookups + formatting off request thread entirely
+        socketio.start_background_task(
+            telegram_alert_service.send_order_alert,
+            'placeorder', order_data, order_response_data, original_data.get('apikey')
+        )
         return True, order_response_data, 200
     else:
         message = response_data.get('message', 'Failed to place order') if isinstance(response_data, dict) else 'Failed to place order'
@@ -213,18 +230,20 @@ def place_order(
     order_data: Dict[str, Any],
     api_key: Optional[str] = None,
     auth_token: Optional[str] = None,
-    broker: Optional[str] = None
+    broker: Optional[str] = None,
+    emit_event: bool = True
 ) -> Tuple[bool, Dict[str, Any], int]:
     """
     Place an order with the broker.
     Supports both API-based authentication and direct internal calls.
-    
+
     Args:
         order_data: Order data containing all required fields
         api_key: OpenAlgo API key (for API-based calls)
         auth_token: Direct broker authentication token (for internal calls)
         broker: Direct broker name (for internal calls)
-        
+        emit_event: Whether to emit socket event (default True, set False for batch orders)
+
     Returns:
         Tuple containing:
         - Success status (bool)
@@ -236,7 +255,15 @@ def place_order(
         original_data['apikey'] = api_key
         # Also add apikey to order_data for validation
         order_data['apikey'] = api_key
-    
+
+    # Check if order should be routed to Action Center (semi-auto mode)
+    # Only check for API-based calls, not internal calls
+    if api_key and not (auth_token and broker):
+        from services.order_router_service import should_route_to_pending, queue_order
+
+        if should_route_to_pending(api_key, 'placeorder'):
+            return queue_order(api_key, original_data, 'placeorder')
+
     # Validate the order data
     is_valid, _, error_message = validate_order_data(order_data)
     if not is_valid:
@@ -245,7 +272,7 @@ def place_order(
         error_response = {'status': 'error', 'message': error_message}
         executor.submit(async_log_order, 'placeorder', original_data, error_response)
         return False, error_response, 400
-    
+
     # Case 1: API-based authentication
     if api_key and not (auth_token and broker):
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
@@ -256,12 +283,12 @@ def place_order(
             }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
-        
-        return place_order_with_auth(order_data, AUTH_TOKEN, broker_name, original_data)
-    
+
+        return place_order_with_auth(order_data, AUTH_TOKEN, broker_name, original_data, emit_event)
+
     # Case 2: Direct internal call with auth_token and broker
     elif auth_token and broker:
-        return place_order_with_auth(order_data, auth_token, broker, original_data)
+        return place_order_with_auth(order_data, auth_token, broker, original_data, emit_event)
     
     # Case 3: Invalid parameters
     else:

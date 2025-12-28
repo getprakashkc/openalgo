@@ -40,13 +40,17 @@ def emit_analyzer_error(request_data: Dict[str, Any], error_message: str) -> Dic
     
     # Log to analyzer database
     executor.submit(async_log_analyzer, analyzer_request, error_response, 'cancelallorder')
-    
-    # Emit socket event
-    socketio.emit('analyzer_update', {
-        'request': analyzer_request,
-        'response': error_response
-    })
-    
+
+    # Emit socket event asynchronously (non-blocking)
+    socketio.start_background_task(
+        socketio.emit,
+        'analyzer_update',
+        {
+            'request': analyzer_request,
+            'response': error_response
+        }
+    )
+
     return error_response
 
 def import_broker_module(broker_name: str) -> Optional[Any]:
@@ -114,14 +118,21 @@ def cancel_all_orders_with_auth(
         # Log to analyzer database with complete request and response
         executor.submit(async_log_analyzer, analyzer_request, response_data, 'cancelallorder')
 
-        # Emit socket event for toast notification
-        socketio.emit('analyzer_update', {
-            'request': analyzer_request,
-            'response': response_data
-        })
+        # Emit socket event for toast notification asynchronously (non-blocking)
+        socketio.start_background_task(
+            socketio.emit,
+            'analyzer_update',
+            {
+                'request': analyzer_request,
+                'response': response_data
+            }
+        )
 
-        # Send Telegram alert for analyze mode
-        telegram_alert_service.send_order_alert('cancelallorder', order_data, response_data, order_data.get('apikey'))
+        # Send Telegram alert in background task (non-blocking)
+        socketio.start_background_task(
+            telegram_alert_service.send_order_alert,
+            'cancelallorder', order_data, response_data, order_data.get('apikey')
+        )
         return success, response_data, status_code
 
     broker_module = import_broker_module(broker)
@@ -146,14 +157,6 @@ def cancel_all_orders_with_auth(
         executor.submit(async_log_order, 'cancelallorder', original_data, error_response)
         return False, error_response, 500
 
-    # Emit events for each canceled order
-    for orderid in canceled_orders:
-        socketio.emit('cancel_order_event', {
-            'status': 'success', 
-            'orderid': orderid,
-            'mode': 'live'
-        })
-
     # Prepare response data
     response_data = {
         'status': 'success',
@@ -162,11 +165,29 @@ def cancel_all_orders_with_auth(
         'message': f'Canceled {len(canceled_orders)} orders. Failed to cancel {len(failed_cancellations)} orders.'
     }
 
+    # Emit single summary event at the end (page refreshes only once)
+    socketio.start_background_task(
+        socketio.emit,
+        'cancel_order_event',
+        {
+            'status': 'success',
+            'orderid': f"{len(canceled_orders)} orders canceled",
+            'mode': 'live',
+            'batch_order': True,
+            'is_last_order': True,
+            'canceled_count': len(canceled_orders),
+            'failed_count': len(failed_cancellations)
+        }
+    )
+
     # Log the action asynchronously
     executor.submit(async_log_order, 'cancelallorder', order_request_data, response_data)
 
-    # Send Telegram alert for live mode
-    telegram_alert_service.send_order_alert('cancelallorder', order_data, response_data, order_data.get('apikey'))
+    # Send Telegram alert in background task (non-blocking)
+    socketio.start_background_task(
+        telegram_alert_service.send_order_alert,
+        'cancelallorder', order_data, response_data, original_data.get('apikey')
+    )
 
     return True, response_data, 200
 
@@ -201,9 +222,27 @@ def cancel_all_orders(
     
     # Case 1: API-based authentication
     if api_key and not (auth_token and broker):
+        # Check if user is in semi-auto mode (cancelallorder is blocked in semi-auto)
+        # BUT allow execution in analyze/sandbox mode (virtual trading should always work)
+        from database.auth_db import verify_api_key, get_order_mode
+
+        # Check analyze mode first - if in analyze mode, allow execution
+        if not get_analyze_mode():
+            user_id = verify_api_key(api_key)
+            if user_id:
+                order_mode = get_order_mode(user_id)
+                if order_mode == 'semi_auto':
+                    error_response = {
+                        'status': 'error',
+                        'message': 'Cancel all orders operation is not allowed in Semi-Auto mode. Please switch to Auto mode to cancel orders.'
+                    }
+                    logger.warning(f"Cancel all orders blocked for user {user_id} (semi-auto mode)")
+                    executor.submit(async_log_order, 'cancelallorder', original_data, error_response)
+                    return False, error_response, 403
+
         # Add API key to order data
         order_data['apikey'] = api_key
-        
+
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
             error_response = {
