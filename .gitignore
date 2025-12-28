@@ -1,11 +1,9 @@
 venopenalgo
 .venv/
-.env
 openalgo.db
 *.db-shm
 *.db-wal
 *.db-journal
-.env
 .flaskenv
 *.pyc
 __pycache__/
@@ -40,7 +38,6 @@ db/strategy_encryption.key
 !data/qtyfreeze.csv
 
 # Environments 
-.env 
 .venv 
 env/ 
 venv/ 
