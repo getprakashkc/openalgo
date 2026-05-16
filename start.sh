@@ -8,15 +8,75 @@ echo "[OpenAlgo] Starting up..."
 # Determine writable .env location
 ENV_FILE="/app/.env"
 
-# Check if .env exists, is readable, and has content (not empty)
-if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
-    echo "[OpenAlgo] Using existing .env file"
-else
-    echo "[OpenAlgo] No .env file found or file is empty. Checking for environment variables..."
-    
-    # Check if we're on Railway/Coolify/cloud (HOST_SERVER is the key indicator)
-    if [ -n "$HOST_SERVER" ]; then
-        echo "[OpenAlgo] Cloud environment detected. Generating .env from environment variables..."
+PLACEHOLDER_APP_KEY="OPENALGO_PLACEHOLDER_APP_KEY_REGENERATE_BEFORE_USE"
+PLACEHOLDER_PEPPER="OPENALGO_PLACEHOLDER_API_KEY_PEPPER_REGENERATE_BEFORE_USE"
+LEAKED_APP_KEY="3daa0403ce2501ee7432b75bf100048e3cf510d63d2754f952729a991d8e2417"
+LEAKED_PEPPER="a25d94718479b170c16278e321ea6c989358bf499a658fd20c90033cef8ce772"
+
+is_compromised_app_key() {
+    case "$1" in
+        ""|$PLACEHOLDER_APP_KEY|$LEAKED_APP_KEY) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_compromised_pepper() {
+    case "$1" in
+        ""|$PLACEHOLDER_PEPPER|$LEAKED_PEPPER) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cloud_env_missing_message() {
+    cat <<'MISSING_ENV' >&2
+
+============================================================
+[OpenAlgo] Coolify / cloud startup — missing environment variables
+============================================================
+
+Set these in Coolify → Environment (see deploy/coolify/env.example).
+Generate NEW secrets — do not copy APP_KEY or API_KEY_PEPPER from
+.sample.env or an old local .env file.
+
+Required:
+  HOST_SERVER          https://your-domain (you have this)
+  REDIRECT_URL         https://your-domain/<broker>/callback
+  WEBSOCKET_URL        wss://your-domain/ws
+  CORS_ALLOWED_ORIGINS https://your-domain
+  VALID_BROKERS        one broker only, e.g. kotak
+  BROKER_API_KEY / BROKER_API_SECRET
+  APP_KEY              python -c "import secrets; print(secrets.token_hex(32))"
+  API_KEY_PEPPER       python -c "import secrets; print(secrets.token_hex(32))"
+
+Optional but recommended:
+  OPENALGO_INSTANCE_NAME   e.g. sharada-kotak
+
+============================================================
+MISSING_ENV
+}
+
+cloud_env_compromised_message() {
+    cat <<'BAD_KEYS' >&2
+
+============================================================
+[OpenAlgo] Coolify / cloud startup — invalid APP_KEY or API_KEY_PEPPER
+============================================================
+
+The values in Coolify are empty, placeholders, or publicly-known
+leaked keys from old install scripts. Generate two NEW random values:
+
+  python -c "import secrets; print(secrets.token_hex(32))"
+
+Set APP_KEY and API_KEY_PEPPER in Coolify → Environment, then redeploy.
+Do not reuse keys from your PC's .env unless you generated them fresh.
+
+============================================================
+BAD_KEYS
+}
+
+write_cloud_env_file() {
+    ENV_FILE="/app/.env"
+    echo "[OpenAlgo] Cloud environment detected. Generating .env from environment variables..."
 
         # Extract domain without https:// for WebSocket URL / CSP
         HOST_DOMAIN="${HOST_SERVER#https://}"
@@ -62,7 +122,7 @@ BROKER_API_SECRET_MARKET = '${BROKER_API_SECRET_MARKET:-}'
 REDIRECT_URL = '${REDIRECT_URL}'
 
 # Valid Brokers Configuration
-VALID_BROKERS = '${VALID_BROKERS:-fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,definedge,deltaexchange,dhan,dhan_sandbox,firstock,flattrade,fyers,groww,ibulls,iifl,iiflcapital,indmoney,jainamxts,kotak,motilal,mstock,nubra,paytm,pocketful,rmoney,samco,shoonya,tradejini,upstox,wisdom,zebu,zerodha}'
+VALID_BROKERS = '${VALID_BROKERS}'
 
 # Security Configuration
 APP_KEY = '${APP_KEY}'
@@ -183,31 +243,37 @@ STRATEGY_LOG_MAX_SIZE_MB = '${STRATEGY_LOG_MAX_SIZE_MB:-50}'
 STRATEGY_LOG_RETENTION_DAYS = '${STRATEGY_LOG_RETENTION_DAYS:-7}'
 EOF
 
-        echo "[OpenAlgo] .env file generated at $ENV_FILE"
-        echo "[OpenAlgo] Configuration: HOST_SERVER=${HOST_SERVER}"
-        
-        # If we wrote to /tmp, create symlink to /app/.env (or copy if symlink fails)
-        if [ "$ENV_FILE" = "/tmp/.env" ]; then
-            ln -sf /tmp/.env /app/.env 2>/dev/null || cp /tmp/.env /app/.env 2>/dev/null || true
-            echo "[OpenAlgo] Linked .env to /app/.env"
-        fi
-    else
-        echo "============================================"
-        echo "Error: .env file not found."
-        echo "Solution: Copy .sample.env to .env and configure your settings"
-        echo ""
-        echo "For Coolify / Railway / cloud deployment, set environment variables"
-        echo "in the platform UI (see deploy/coolify/env.example). Minimum:"
-        echo "  - OPENALGO_INSTANCE_NAME (unique per instance, e.g. kotak-user1)"
-        echo "  - HOST_SERVER (https://your-domain — not 127.0.0.1)"
-        echo "  - REDIRECT_URL (https://your-domain/broker/callback)"
-        echo "  - WEBSOCKET_URL (wss://your-domain/ws)"
-        echo "  - VALID_BROKERS (single broker, e.g. kotak)"
-        echo "  - BROKER_API_KEY / BROKER_API_SECRET"
-        echo "  - APP_KEY / API_KEY_PEPPER (secrets.token_hex(32) each)"
-        echo "============================================"
+    echo "[OpenAlgo] .env file generated at $ENV_FILE"
+    echo "[OpenAlgo] Configuration: HOST_SERVER=${HOST_SERVER}"
+
+    # If we wrote to /tmp, point /app/.env at it (works when /app/.env is not writable)
+    if [ "$ENV_FILE" = "/tmp/.env" ]; then
+        rm -f /app/.env 2>/dev/null || true
+        ln -sf /tmp/.env /app/.env 2>/dev/null || cp /tmp/.env /app/.env 2>/dev/null || true
+        echo "[OpenAlgo] Linked .env to /app/.env"
+    fi
+}
+
+# Coolify/Railway: HOST_SERVER in the process environment → always rebuild .env from UI vars
+if [ -n "$HOST_SERVER" ]; then
+    if [ -z "$REDIRECT_URL" ] || [ -z "$VALID_BROKERS" ] || [ -z "$BROKER_API_KEY" ] || [ -z "$BROKER_API_SECRET" ]; then
+        cloud_env_missing_message
         exit 1
     fi
+    if is_compromised_app_key "$APP_KEY" || is_compromised_pepper "$API_KEY_PEPPER"; then
+        cloud_env_compromised_message
+        exit 1
+    fi
+    write_cloud_env_file
+elif [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
+    echo "[OpenAlgo] Using existing .env file"
+else
+    echo "============================================"
+    echo "Error: .env file not found."
+    echo "Solution: Copy .sample.env to .env and configure your settings"
+    echo "For Coolify, set HOST_SERVER and other vars in the UI (deploy/coolify/env.example)."
+    echo "============================================"
+    exit 1
 fi
 
 # ============================================
@@ -246,12 +312,8 @@ cd /app
 # rotation crashes the worker with `Permission denied: .env.tmp` and gunicorn
 # enters a restart loop. Catch that here, before gunicorn starts, with an
 # unmissable message instead of a buried 12-line stack trace.
-PLACEHOLDER_APP_KEY="OPENALGO_PLACEHOLDER_APP_KEY_REGENERATE_BEFORE_USE"
-PLACEHOLDER_PEPPER="OPENALGO_PLACEHOLDER_API_KEY_PEPPER_REGENERATE_BEFORE_USE"
-LEAKED_APP_KEY="3daa0403ce2501ee7432b75bf100048e3cf510d63d2754f952729a991d8e2417"
-LEAKED_PEPPER="a25d94718479b170c16278e321ea6c989358bf499a658fd20c90033cef8ce772"
-
-if [ -f "/app/.env" ]; then
+# Skip file-based preflight when Coolify env already validated above
+if [ -z "$HOST_SERVER" ] && [ -f "/app/.env" ]; then
     CURRENT_APP_KEY=$(grep '^APP_KEY' /app/.env 2>/dev/null | sed -E "s/.*=\s*'([^']*)'.*/\1/" | head -n1)
     CURRENT_PEPPER=$(grep '^API_KEY_PEPPER' /app/.env 2>/dev/null | sed -E "s/.*=\s*'([^']*)'.*/\1/" | head -n1)
 
