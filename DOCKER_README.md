@@ -55,6 +55,10 @@ All data is stored locally in the script directory:
 - `log/` - Application and strategy logs
 - `.env` - Configuration file
 
+## Coolify (multiple broker instances)
+
+Use one Git source for every instance: **[deploy/coolify/](deploy/coolify/README.md)** — compose path `deploy/coolify/docker-compose.yaml`, all settings in Coolify Environment.
+
 ## Documentation
 
 - **Full Docs**: https://docs.openalgo.in

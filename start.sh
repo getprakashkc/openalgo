@@ -14,27 +14,41 @@ if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
 else
     echo "[OpenAlgo] No .env file found or file is empty. Checking for environment variables..."
     
-    # Check if we're on Railway/Cloud (HOST_SERVER is the key indicator)
+    # Check if we're on Railway/Coolify/cloud (HOST_SERVER is the key indicator)
     if [ -n "$HOST_SERVER" ]; then
-        echo "[OpenAlgo] Environment variables detected. Generating .env file..."
-        
-        # Extract domain without https:// for WebSocket URL
+        echo "[OpenAlgo] Cloud environment detected. Generating .env from environment variables..."
+
+        # Extract domain without https:// for WebSocket URL / CSP
         HOST_DOMAIN="${HOST_SERVER#https://}"
         HOST_DOMAIN="${HOST_DOMAIN#http://}"
-        
+        HOST_DOMAIN="${HOST_DOMAIN%%/*}"
+
+        # Per-instance cookie names when running many Coolify apps
+        INSTANCE_NAME="${OPENALGO_INSTANCE_NAME:-}"
+        if [ -n "$INSTANCE_NAME" ]; then
+            SAFE_ID=$(echo "$INSTANCE_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_' | sed 's/__*/_/g')
+            SESSION_COOKIE="${SESSION_COOKIE_NAME:-session_${SAFE_ID}}"
+            CSRF_COOKIE="${CSRF_COOKIE_NAME:-csrf_${SAFE_ID}}"
+            echo "[OpenAlgo] Instance: ${INSTANCE_NAME}"
+        else
+            SESSION_COOKIE="${SESSION_COOKIE_NAME:-session}"
+            CSRF_COOKIE="${CSRF_COOKIE_NAME:-csrf_token}"
+        fi
+
         # Try to write to /app/.env, fallback to /tmp/.env if permission denied
         if ! touch "$ENV_FILE" 2>/dev/null; then
             echo "[OpenAlgo] Cannot write to /app/.env, using /tmp/.env"
             ENV_FILE="/tmp/.env"
         fi
-        
-        # Use Railway's PORT, default to 5000 for local development
+
+        # Container listens on 5000 unless platform sets PORT (e.g. Railway)
         APP_PORT="${PORT:-5000}"
-        
+
         cat > "$ENV_FILE" << EOF
 # OpenAlgo Environment Configuration File
 # Auto-generated from environment variables
-ENV_CONFIG_VERSION = '${ENV_CONFIG_VERSION:-1.0.4}'
+ENV_CONFIG_VERSION = '${ENV_CONFIG_VERSION:-1.0.7}'
+OPENALGO_INSTANCE_NAME = '${OPENALGO_INSTANCE_NAME:-}'
 
 # Broker Configuration
 BROKER_API_KEY = '${BROKER_API_KEY}'
@@ -58,7 +72,9 @@ API_KEY_PEPPER = '${API_KEY_PEPPER}'
 DATABASE_URL = '${DATABASE_URL:-sqlite:///db/openalgo.db}'
 LATENCY_DATABASE_URL = '${LATENCY_DATABASE_URL:-sqlite:///db/latency.db}'
 LOGS_DATABASE_URL = '${LOGS_DATABASE_URL:-sqlite:///db/logs.db}'
+HEALTH_DATABASE_URL = '${HEALTH_DATABASE_URL:-sqlite:///db/health.db}'
 SANDBOX_DATABASE_URL = '${SANDBOX_DATABASE_URL:-sqlite:///db/sandbox.db}'
+HISTORIFY_DATABASE_URL = '${HISTORIFY_DATABASE_URL:-db/historify.duckdb}'
 
 # Ngrok - Disabled for cloud deployment
 NGROK_ALLOW = '${NGROK_ALLOW:-FALSE}'
@@ -77,6 +93,14 @@ FLASK_ENV = '${FLASK_ENV:-production}'
 WEBSOCKET_HOST = '0.0.0.0'
 WEBSOCKET_PORT = '${WEBSOCKET_PORT:-8765}'
 WEBSOCKET_URL = '${WEBSOCKET_URL:-wss://${HOST_DOMAIN}/ws}'
+WS_AUTH_GRACE_SECONDS = '${WS_AUTH_GRACE_SECONDS:-15}'
+WS_MAX_QUEUE = '${WS_MAX_QUEUE:-1024}'
+WS_PING_INTERVAL = '${WS_PING_INTERVAL:-20}'
+WS_PING_TIMEOUT = '${WS_PING_TIMEOUT:-20}'
+
+MAX_SYMBOLS_PER_WEBSOCKET = '${MAX_SYMBOLS_PER_WEBSOCKET:-1000}'
+MAX_WEBSOCKET_CONNECTIONS = '${MAX_WEBSOCKET_CONNECTIONS:-3}'
+ENABLE_CONNECTION_POOLING = '${ENABLE_CONNECTION_POOLING:-true}'
 
 # ZeroMQ Configuration
 # Internal message bus — always loopback. Broker adapters and the WS proxy run
@@ -105,6 +129,11 @@ STRATEGY_RATE_LIMIT = '${STRATEGY_RATE_LIMIT:-200 per minute}'
 
 # API Configuration
 SESSION_EXPIRY_TIME = '${SESSION_EXPIRY_TIME:-03:00}'
+DISABLE_SESSION_EXPIRY = '${DISABLE_SESSION_EXPIRY:-false}'
+MASTER_CONTRACT_CUTOFF_TIME = '${MASTER_CONTRACT_CUTOFF_TIME:-08:00}'
+CRYPTO_MASTER_CONTRACT_CUTOFF_TIME = '${CRYPTO_MASTER_CONTRACT_CUTOFF_TIME:-00:00}'
+
+TRUST_PROXY_HEADERS = '${TRUST_PROXY_HEADERS:-TRUE}'
 
 # CORS Configuration
 CORS_ENABLED = '${CORS_ENABLED:-TRUE}'
@@ -138,8 +167,20 @@ CSRF_ENABLED = '${CSRF_ENABLED:-TRUE}'
 CSRF_TIME_LIMIT = '${CSRF_TIME_LIMIT:-}'
 
 # Cookie Configuration
-SESSION_COOKIE_NAME = '${SESSION_COOKIE_NAME:-session}'
-CSRF_COOKIE_NAME = '${CSRF_COOKIE_NAME:-csrf_token}'
+SESSION_COOKIE_NAME = '${SESSION_COOKIE}'
+CSRF_COOKIE_NAME = '${CSRF_COOKIE}'
+
+# Remote MCP (optional)
+MCP_HTTP_ENABLED = '${MCP_HTTP_ENABLED:-False}'
+MCP_PUBLIC_URL = '${MCP_PUBLIC_URL:-}'
+MCP_OAUTH_REQUIRE_APPROVAL = '${MCP_OAUTH_REQUIRE_APPROVAL:-False}'
+MCP_OAUTH_WRITE_SCOPE_ENABLED = '${MCP_OAUTH_WRITE_SCOPE_ENABLED:-True}'
+MCP_HTTP_CORS_ORIGINS = '${MCP_HTTP_CORS_ORIGINS:-https://claude.ai,https://chatgpt.com}'
+
+STRATEGY_MEMORY_LIMIT_MB = '${STRATEGY_MEMORY_LIMIT_MB:-1024}'
+STRATEGY_LOG_MAX_FILES = '${STRATEGY_LOG_MAX_FILES:-10}'
+STRATEGY_LOG_MAX_SIZE_MB = '${STRATEGY_LOG_MAX_SIZE_MB:-50}'
+STRATEGY_LOG_RETENTION_DAYS = '${STRATEGY_LOG_RETENTION_DAYS:-7}'
 EOF
 
         echo "[OpenAlgo] .env file generated at $ENV_FILE"
@@ -155,13 +196,15 @@ EOF
         echo "Error: .env file not found."
         echo "Solution: Copy .sample.env to .env and configure your settings"
         echo ""
-        echo "For cloud deployment (Railway/Render), set these environment variables:"
-        echo "  - HOST_SERVER (your app domain, e.g., https://your-app.up.railway.app)"
-        echo "  - REDIRECT_URL (your broker callback URL)"
-        echo "  - BROKER_API_KEY"
-        echo "  - BROKER_API_SECRET"
-        echo "  - APP_KEY (generate with: python -c \"import secrets; print(secrets.token_hex(32))\")"
-        echo "  - API_KEY_PEPPER (generate another one)"
+        echo "For Coolify / Railway / cloud deployment, set environment variables"
+        echo "in the platform UI (see deploy/coolify/env.example). Minimum:"
+        echo "  - OPENALGO_INSTANCE_NAME (unique per instance, e.g. kotak-user1)"
+        echo "  - HOST_SERVER (https://your-domain — not 127.0.0.1)"
+        echo "  - REDIRECT_URL (https://your-domain/broker/callback)"
+        echo "  - WEBSOCKET_URL (wss://your-domain/ws)"
+        echo "  - VALID_BROKERS (single broker, e.g. kotak)"
+        echo "  - BROKER_API_KEY / BROKER_API_SECRET"
+        echo "  - APP_KEY / API_KEY_PEPPER (secrets.token_hex(32) each)"
         echo "============================================"
         exit 1
     fi

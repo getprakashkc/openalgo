@@ -1,6 +1,7 @@
 venopenalgo
 .venv/
 .env
+.env.kotak
 openalgo.db
 *.db-shm
 *.db-wal
