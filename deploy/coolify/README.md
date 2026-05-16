@@ -6,7 +6,16 @@ One **Git source**, one **compose file**, many **Coolify applications** — each
 
 1. **New resource** in Coolify → Docker Compose → Git repository `marketcalls/openalgo` (or your fork).
 
-2. **Compose file path:** `deploy/coolify/docker-compose.yaml`
+2. **Coolify compose fields** (exact format matters — no trailing `.`):
+
+   | Field | Value |
+   |-------|--------|
+   | Base Directory | `/` |
+   | Docker Compose Location | `/docker-compose.coolify.yaml` |
+
+   Alternative: Base Directory `/deploy/coolify`, Docker Compose Location `/docker-compose.yaml`
+
+   The root file `docker-compose.coolify.yaml` is the recommended path (avoids subdirectory validation issues on some Coolify versions).
 
 3. **Domain:** assign `https://your-subdomain.example.com` → container port **5000**.
 

@@ -1,0 +1,76 @@
+# OpenAlgo — Coolify (use this file in Coolify UI)
+#
+# Coolify settings:
+#   Base Directory: /
+#   Docker Compose Location: /docker-compose.coolify.yaml
+#   (no trailing dot; leading slash is OK)
+#
+# Full docs: deploy/coolify/README.md and deploy/coolify/env.example
+
+name: ${OPENALGO_INSTANCE_NAME:-openalgo}
+
+services:
+  openalgo:
+    image: openalgo:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    expose:
+      - "5000"
+      - "8765"
+
+    volumes:
+      - openalgo_db:/app/db
+      - openalgo_log:/app/log
+      - openalgo_strategies:/app/strategies
+      - openalgo_keys:/app/keys
+      - openalgo_tmp:/app/tmp
+
+    environment:
+      - TZ=Asia/Kolkata
+      - FLASK_HOST_IP=0.0.0.0
+      - WEBSOCKET_HOST=0.0.0.0
+      - OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-2}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-2}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-2}
+      - NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-2}
+      - NUMBA_NUM_THREADS=${NUMBA_NUM_THREADS:-2}
+      - STRATEGY_MEMORY_LIMIT_MB=${STRATEGY_MEMORY_LIMIT_MB:-1024}
+      - OPENALGO_INSTANCE_NAME=${OPENALGO_INSTANCE_NAME}
+      - HOST_SERVER=${HOST_SERVER}
+      - REDIRECT_URL=${REDIRECT_URL}
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - VALID_BROKERS=${VALID_BROKERS}
+      - BROKER_API_KEY=${BROKER_API_KEY}
+      - BROKER_API_SECRET=${BROKER_API_SECRET}
+      - BROKER_API_KEY_MARKET=${BROKER_API_KEY_MARKET}
+      - BROKER_API_SECRET_MARKET=${BROKER_API_SECRET_MARKET}
+      - APP_KEY=${APP_KEY}
+      - API_KEY_PEPPER=${API_KEY_PEPPER}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - SESSION_COOKIE_NAME=${SESSION_COOKIE_NAME}
+      - CSRF_COOKIE_NAME=${CSRF_COOKIE_NAME}
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-TRUE}
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-0}
+      - MCP_HTTP_ENABLED=${MCP_HTTP_ENABLED}
+      - MCP_PUBLIC_URL=${MCP_PUBLIC_URL}
+
+    shm_size: ${SHM_SIZE:-512m}
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/auth/check-setup"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    restart: unless-stopped
+
+volumes:
+  openalgo_db:
+  openalgo_log:
+  openalgo_strategies:
+  openalgo_keys:
+  openalgo_tmp:
